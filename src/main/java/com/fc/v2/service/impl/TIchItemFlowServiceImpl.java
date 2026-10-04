@@ -395,7 +395,6 @@ public class TIchItemFlowServiceImpl implements ITIchItemFlowService {
         this.ichItemFlowVersionMapper.insert(row);
 
         TIchItemFlow patch = new TIchItemFlow();
-        patch.setId(id);
         patch.setItemName(newName);
         patch.setProtectUnit(newUnit);
         patch.setCategory(newCategory);
@@ -404,7 +403,17 @@ public class TIchItemFlowServiceImpl implements ITIchItemFlowService {
         patch.setEntryCode(newCode);
         patch.setLastAction("变更第" + newVersion + "版");
         patch.setUpdateTime(now);
-        this.ichItemFlowMapper.updateById(patch);
+        // 落笔按起笔时点到的版次与在册情形比对：同一动作连点两下、或落笔瞬间被别人
+        // 注销/变更，这一回整笔回滚（新版行与旧版挪往期一并撤回），不留两张同版次的现行版
+        UpdateWrapper<TIchItemFlow> uw = new UpdateWrapper<>();
+        uw.eq("id", id)
+                .eq("current_version", oldVersion)
+                .eq("close_outcome", ItemFlowRuler.CLOSE_LISTED)
+                .eq("listed_flag", 1);
+        if (this.ichItemFlowMapper.update(patch, uw) == 0) {
+            throw new ItemFlowException(ItemFlowException.Reason.CONCURRENT_CHANGED,
+                    "变更落笔瞬间单据已被别人推动（注销或另起版），请按最新情形重新办理");
+        }
 
         // 底册项目随现行版走：名录上只露最新那一版的名目（在册数不加不减）
         if (bill.getProjectId() != null) {
@@ -445,8 +454,11 @@ public class TIchItemFlowServiceImpl implements ITIchItemFlowService {
     }
 
     @Override
+    @Transactional(readOnly = true)
     public RosterView roster() {
-        // 两处数同一回装载点出：一边顺现行版次，一边顺底册在册，不分两回取了再凑
+        // 两处数同一回装载点出：一边顺现行版次，一边顺底册在册，不分两回取了再凑。
+        // 两把查询落在同一个只读事务里（同一快照），两查之间别人列入/注销落了库，
+        // 也掀不动这一回点出的两个数——屏上这一对数要么同见旧账、要么同见新账。
         int byRoster = 0;
         List<TIchItemFlow> bills = this.ichItemFlowMapper.selectList(
                 new QueryWrapper<TIchItemFlow>().eq("del_flag", 0));
