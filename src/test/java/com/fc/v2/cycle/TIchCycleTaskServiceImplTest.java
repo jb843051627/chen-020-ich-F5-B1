@@ -137,10 +137,17 @@ public class TIchCycleTaskServiceImplTest {
             }
             return null;
         });
-        when(taskMapper.updateById(any())).thenAnswer(inv -> {
+        when(taskMapper.update(any(), any())).thenAnswer(inv -> {
             TIchCycleTask patch = inv.getArgument(0);
             for (TIchCycleTask r : rows) {
                 if (r.getId().equals(patch.getId())) {
+                    // 模拟库级抢行（CAS）：仍是未删、候办的行才翻得动，
+                    // 已被并发那一轮抢先翻走的行命中 0 行
+                    boolean pending = (r.getDelFlag() == null || r.getDelFlag() == 0)
+                            && r.getStatus() != null && r.getStatus() == 0;
+                    if (!pending) {
+                        return 0;
+                    }
                     if (patch.getStatus() != null) {
                         r.setStatus(patch.getStatus());
                     }
@@ -427,5 +434,37 @@ public class TIchCycleTaskServiceImplTest {
         assertEquals(0, report.getPending());
         assertEquals(CycleRoundReport.MSG_NONE_DUE, report.getMessage());
         assertFalse(report.isPressed());
+    }
+
+    @Test
+    public void 并发抢行失败_办妥不重复计数也不重复留痕() {
+        TIchCycleTask r = row(1, "2026-10-08 18:00:00", 5);
+        // 两轮调度并发：另一轮落笔先成，本轮抢行（status=候办 的 CAS）命中 0 行
+        org.mockito.Mockito.doReturn(0).when(taskMapper).update(any(), any());
+
+        CycleRoundReport report = service.runRound(dt("2026-10-05 10:00:00"));
+        // 本行捞是捞进了本轮，但抢输：不算办妥、不算催不动，仍挂候办等下一轮
+        assertEquals(1, report.getPicked());
+        assertEquals(0, report.getDone());
+        assertEquals(0, report.getFailed());
+        assertEquals(1, report.getPending());
+        // 抢输之后不留任何送达痕迹——旧写法抢输也照样插两笔
+        assertTrue(logsOf(1L).isEmpty());
+        // 内存行不被抢输这一轮翻成办妥
+        assertEquals(0, r.getStatus());
+    }
+
+    @Test
+    public void 并发抢行失败_逾期撤回不留痕缘由也不写() {
+        TIchCycleTask r = row(1, "2026-10-04 18:00:00", 3);
+        org.mockito.Mockito.doReturn(0).when(taskMapper).update(any(), any());
+
+        CycleRoundReport report = service.runRound(dt("2026-10-05 10:00:00"));
+        assertEquals(0, report.getFailed());
+        assertEquals(1, report.getPending());
+        // 撤回留痕只在抢行成功后才落：抢输一笔不留
+        assertTrue(logsOf(1L).isEmpty());
+        assertEquals(0, r.getStatus());
+        assertNull(r.getFailReason());
     }
 }

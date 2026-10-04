@@ -106,7 +106,14 @@ public class TIchItemFlowServiceImpl implements ITIchItemFlowService {
         bill.setLastAction("立单");
         bill.setDelFlag(0);
         bill.setCreateTime(now);
-        this.ichItemFlowMapper.insert(bill);
+        try {
+            this.ichItemFlowMapper.insert(bill);
+        } catch (org.springframework.dao.DuplicateKeyException dup) {
+            // 库侧"在跑归口号"唯一索引兜底：两份立单并发挤过上面的在跑检查时，
+            // 后一笔在落库一刻被挡下，按同一张在跑单论，不留第二张
+            throw new ItemFlowException(ItemFlowException.Reason.DUPLICATE_RUNNING,
+                    "申报 " + declareNo + " 已有一张在跑的单（并发立单已被库规挡下）");
+        }
         if (trim(data.getBizNo()).isEmpty()) {
             bill.setBizNo("SB" + bill.getId());
         } else {

@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.fc.v2.mapper.auto.TIchCycleLogMapper;
 import com.fc.v2.mapper.auto.TIchCycleTaskMapper;
 import com.fc.v2.mapper.auto.TIchProjectMapper;
@@ -176,74 +177,86 @@ public class TIchCycleTaskServiceImpl implements ITIchCycleTaskService {
      * 催不动（缘由顺着写进同一条里）、本轮不算（落笔瞬间已被别人推动，等下一轮）。
      */
     private CycleRowOutcome processRow(TIchCycleTask row, Date at, Map<String, TIchProject> projects) {
-        // 到了该出手那日还没送出去的：把话撤回、这一行改判催不动。
-        // 撤回另记一笔，事后查得到它的存在；它盖不住 due_at 与 done_at 两处旧字。
+        // 三种催不动缘由先判；翻状态、写缘由、留痕都等抢行成功之后再做，
+        // 抢输的并发轮一笔不留、一个不算
+        String failReason = null;
         if (this.cycleRuler.isOverdue(at, row.getDueAt())) {
-            insertLog(row, ACTION_WITHDRAW, "越过该出手那一日仍未送出，话已撤回", at);
-            if (!failRow(row, REASON_OVERDUE_WITHDRAWN, at)) {
-                return null;
+            failReason = REASON_OVERDUE_WITHDRAWN;
+        } else {
+            // 项目早已从名录上销号：就地改判催不动，缘由顺着写进同一条里，事后按缘由挑得出来
+            TIchProject project = row.getTargetCode() == null ? null : projects.get(row.getTargetCode());
+            if (project != null && project.getStatus() != null && project.getStatus() == 1) {
+                failReason = REASON_PROJECT_DELISTED;
+            } else if (row.getContact() == null || row.getContact().trim().isEmpty()) {
+                // 联系人那一栏空着几季没人补：就地改判催不动
+                failReason = REASON_CONTACT_EMPTY;
             }
-            return outcomeOf(row, CycleRowOutcome.OUTCOME_FAILED, REASON_OVERDUE_WITHDRAWN);
         }
-
-        // 项目早已从名录上销号：就地改判催不动，缘由顺着写进同一条里，事后按缘由挑得出来
-        TIchProject project = row.getTargetCode() == null ? null : projects.get(row.getTargetCode());
-        if (project != null && project.getStatus() != null && project.getStatus() == 1) {
-            if (!failRow(row, REASON_PROJECT_DELISTED, at)) {
+        if (failReason != null) {
+            if (!claimRow(row, CycleRuler.STATUS_FAIL, failReason, null, at)) {
                 return null;
             }
-            return outcomeOf(row, CycleRowOutcome.OUTCOME_FAILED, REASON_PROJECT_DELISTED);
-        }
-
-        // 联系人那一栏空着几季没人补：就地改判催不动
-        if (row.getContact() == null || row.getContact().trim().isEmpty()) {
-            if (!failRow(row, REASON_CONTACT_EMPTY, at)) {
-                return null;
+            // 撤回另记一笔：抢行成功才记，事后查得到它的存在；它盖不住 due_at 与 done_at 两处旧字。
+            // 销号、联系人空缺两说按旧规矩不另起留痕。
+            if (REASON_OVERDUE_WITHDRAWN.equals(failReason)) {
+                insertLog(row, ACTION_WITHDRAW, "越过该出手那一日仍未送出，话已撤回", at);
             }
-            return outcomeOf(row, CycleRowOutcome.OUTCOME_FAILED, REASON_CONTACT_EMPTY);
+            return outcomeOf(row, CycleRowOutcome.OUTCOME_FAILED, failReason);
         }
 
         // 催办两头递：县文旅局收站内那一条，传承人本人收手机短信息那一条。
         // 哪一路送到就单独记哪一路，手机那一路不算替站内那一路交了差。
+        // 递送若抛异常：本行尚未抢行，仍候办留待下一轮，也不牵连同轮其余行。
         boolean siteOk = this.ichCycleNoticeSender == null || this.ichCycleNoticeSender.sendSiteNotice(row);
+        boolean smsOk = this.ichCycleNoticeSender == null || this.ichCycleNoticeSender.sendSms(row);
+
+        // 抢行：只许仍是候办的行翻成办妥。两轮并发同时捞到这行时，只有落笔先成的一轮算数，
+        // 另一轮 update 命中 0 行直接跳过——不重复翻状态、不重复计数、不重复留痕。
+        if (!claimRow(row, CycleRuler.STATUS_DONE, null, at, at)) {
+            return null;
+        }
+        // 抢行成功之后才留痕：去向已翻办妥，两个送达痕迹各记各的，同笔事务里落下
         if (siteOk) {
             insertLog(row, ACTION_SITE_MSG, "站内送达县文旅局", at);
         }
-        boolean smsOk = this.ichCycleNoticeSender == null || this.ichCycleNoticeSender.sendSms(row);
         if (smsOk) {
             insertLog(row, ACTION_SMS, "手机短信送达传承人 " + row.getContact(), at);
         }
-
-        // 一行算办妥要留两个地方痕迹：去向从候办翻成办妥，紧跟着把办妥的那一刻记上，
-        // 只落其一都不算这一行完事——两个痕迹同一笔落库
-        TIchCycleTask patch = new TIchCycleTask();
-        patch.setId(row.getId());
-        patch.setStatus(CycleRuler.STATUS_DONE);
-        patch.setDoneAt(at);
-        patch.setUpdateTime(at);
-        if (this.ichCycleTaskMapper.updateById(patch) == 0) {
-            return null;
-        }
-        row.setStatus(CycleRuler.STATUS_DONE);
-        row.setDoneAt(at);
         CycleRowOutcome outcome = outcomeOf(row, CycleRowOutcome.OUTCOME_DONE, null);
         outcome.setSiteMsgSent(siteOk);
         outcome.setSmsSent(smsOk);
         return outcome;
     }
 
-    /** 就地改判催不动：去向翻催不动，卡在哪一处缘由顺着写进同一条里 */
-    private boolean failRow(TIchCycleTask row, String reason, Date at) {
+    /**
+     * 行级抢行（CAS）：只把仍是候办（status=0、未删）的行翻到新去向，
+     * 办妥同笔落 done_at、催不动同笔写缘由。命中 0 行即落笔瞬间已被别人推动，回 false。
+     */
+    private boolean claimRow(TIchCycleTask row, int newStatus, String failReason, Date doneAt, Date at) {
         TIchCycleTask patch = new TIchCycleTask();
         patch.setId(row.getId());
-        patch.setStatus(CycleRuler.STATUS_FAIL);
-        patch.setFailReason(reason);
+        patch.setStatus(newStatus);
+        if (failReason != null) {
+            patch.setFailReason(failReason);
+        }
+        if (doneAt != null) {
+            patch.setDoneAt(doneAt);
+        }
         patch.setUpdateTime(at);
-        if (this.ichCycleTaskMapper.updateById(patch) == 0) {
+        UpdateWrapper<TIchCycleTask> uw = new UpdateWrapper<>();
+        uw.eq("id", row.getId())
+                .eq("del_flag", 0)
+                .eq("status", CycleRuler.STATUS_WAIT);
+        if (this.ichCycleTaskMapper.update(patch, uw) == 0) {
             return false;
         }
-        row.setStatus(CycleRuler.STATUS_FAIL);
-        row.setFailReason(reason);
+        row.setStatus(newStatus);
+        if (failReason != null) {
+            row.setFailReason(failReason);
+        }
+        if (doneAt != null) {
+            row.setDoneAt(doneAt);
+        }
         return true;
     }
 

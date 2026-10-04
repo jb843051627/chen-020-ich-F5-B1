@@ -3,6 +3,7 @@ package com.fc.v2.imagecard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -12,6 +13,7 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -146,5 +148,39 @@ public class TIchImageCardServiceImplTest {
         assertEquals(1, service.selectTIchImageCardList(
                 new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<TIchImageCard>()
                         .eq("bill_no", "JUAN-1")).size());
+    }
+
+    @Test
+    public void 删除只翻删除标记不物理抹除() {
+        assertEquals(1, service.deleteTIchImageCardById(9L));
+        ArgumentCaptor<TIchImageCard> captor = ArgumentCaptor.forClass(TIchImageCard.class);
+        verify(baseMapper).update(captor.capture(), any(Wrapper.class));
+        assertEquals(1, captor.getValue().getDelFlag());
+        // 旧写法的物理删除不许再出现——删了就翻不出这一卷
+        verify(baseMapper, org.mockito.Mockito.never()).deleteById(any());
+    }
+
+    @Test
+    public void 批量删除同样只翻删除标记() {
+        assertEquals(1, service.deleteTIchImageCardByIds("9,10"));
+        ArgumentCaptor<TIchImageCard> captor = ArgumentCaptor.forClass(TIchImageCard.class);
+        verify(baseMapper).update(captor.capture(), any(Wrapper.class));
+        assertEquals(1, captor.getValue().getDelFlag());
+        verify(baseMapper, org.mockito.Mockito.never()).deleteBatchIds(any(java.util.Collection.class));
+    }
+
+    @Test
+    public void 已冻住的卷一个字都改不动() {
+        // 库里这卷已冻住：带冻住守卫的更新命中 0 行
+        when(baseMapper.update(any(), any(Wrapper.class))).thenReturn(0);
+        TIchImageCard c = card("JUAN-1", 7, "100", "120");
+        c.setId(5L);
+        assertEquals(0, service.updateTIchImageCard(c));
+    }
+
+    @Test
+    public void 已冻住的卷删不掉() {
+        when(baseMapper.update(any(), any(Wrapper.class))).thenReturn(0);
+        assertEquals(0, service.deleteTIchImageCardById(5L));
     }
 }

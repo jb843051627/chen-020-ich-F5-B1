@@ -109,6 +109,10 @@ CREATE TABLE IF NOT EXISTS t_ich_image_card (
 -- （stage 只作页面参考列，权威数以 t_ich_item_flow_record 逐格留痕点出）；
 -- 收口有三说：列入/注销/终止，收口即锁档，卷面改不动、整张删不掉。
 -- 一份申报（declare_no）底下只容一张在跑的单，头一张没办完也没喊停，后一张立不住。
+-- 2026-10-04 起：除服务层在跑检查外，库侧再加"在跑归口号"生成列 + 唯一索引兜底，
+-- 两份立单并发挤过检查时由库挡下后一笔（MySQL 唯一索引允许多个 NULL，故无归口号的单不受限；
+-- 收口 status=2 或软删 del_flag=1 后该列自动置 NULL，同一归口号即可再立一张）。
+-- 存量库里若已有同号多张在跑单，先在对账时清理干净，再加这条唯一索引。
 -- 每格的门槛材料齐不齐、公示日子走没走完，一律钉在留痕表的那一格里。
 CREATE TABLE IF NOT EXISTS t_ich_item_flow (
   id bigint NOT NULL COMMENT '主键',
@@ -134,18 +138,36 @@ CREATE TABLE IF NOT EXISTS t_ich_item_flow (
   content varchar(255) DEFAULT NULL COMMENT '一格一记（同格第二遍不另起一行，留头一遍那句）',
   last_action varchar(64) DEFAULT NULL COMMENT '最近一次过口动作',
   del_flag int DEFAULT '0' COMMENT '删除标记 0正常 1删除（收口锁档后删不掉）',
+  running_declare_no varchar(64) GENERATED ALWAYS AS
+    (CASE WHEN (del_flag = 0 OR del_flag IS NULL)
+               AND status IS NOT NULL AND status <> 2
+               AND declare_no IS NOT NULL AND declare_no <> ''
+          THEN declare_no ELSE NULL END) VIRTUAL
+    COMMENT '在跑归口号（生成列：未收口且未删时等于 declare_no，否则 NULL），供唯一索引兜底',
   create_by varchar(64) DEFAULT NULL COMMENT '创建者',
   create_time datetime DEFAULT NULL COMMENT '创建时间',
   update_by varchar(64) DEFAULT NULL COMMENT '更新者',
   update_time datetime DEFAULT NULL COMMENT '更新时间',
   remark varchar(500) DEFAULT NULL COMMENT '备注',
   PRIMARY KEY (id),
-  KEY idx_item_flow_declare (declare_no)
+  KEY idx_item_flow_declare (declare_no),
+  UNIQUE KEY uk_item_flow_running_declare (running_declare_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='名录项目申报单';
 
 -- 一格一记：每格头一回上报写一笔；同格第二次上报不另起一行，仍留头一遍那句。
 -- 后退一格把该格先前所记压到下面（pressed=1），重走从这格再从头攒（另起一笔）。
 -- 已过之格全顺着这张表点出：单据停在第几格、后一格收不收，只由服务层推进方法据它回话。
+
+-- 已建库的迁移（新库由上面的 CREATE TABLE 自带，勿重复执行）：
+-- 先清理同归口号的多张在跑单（下次对账前处理），再加生成列与唯一索引：
+-- ALTER TABLE t_ich_item_flow
+--   ADD COLUMN running_declare_no varchar(64) GENERATED ALWAYS AS
+--     (CASE WHEN (del_flag = 0 OR del_flag IS NULL)
+--                AND status IS NOT NULL AND status <> 2
+--                AND declare_no IS NOT NULL AND declare_no <> ''
+--           THEN declare_no ELSE NULL END) VIRTUAL,
+--   ADD UNIQUE KEY uk_item_flow_running_declare (running_declare_no);
+
 CREATE TABLE IF NOT EXISTS t_ich_item_flow_record (
   id bigint NOT NULL COMMENT '主键',
   bill_id bigint NOT NULL COMMENT '所属申报单 t_ich_item_flow.id',

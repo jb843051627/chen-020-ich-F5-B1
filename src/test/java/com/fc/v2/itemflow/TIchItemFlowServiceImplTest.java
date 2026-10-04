@@ -281,6 +281,18 @@ public class TIchItemFlowServiceImplTest {
     }
 
     @Test
+    public void 并发立单挤过在跑检查时库唯一索引挡下后一笔() {
+        // 两份立单并发：在跑检查都看空，后一笔落库被库侧唯一索引挡下
+        org.mockito.Mockito.doThrow(new org.springframework.dao.DuplicateKeyException(
+                        "uk_item_flow_running_declare"))
+                .when(billMapper).insert(any());
+        ItemFlowException ex = assertThrows(ItemFlowException.class,
+                () -> service.open(fullForm("D-RACE")));
+        assertEquals(ItemFlowException.Reason.DUPLICATE_RUNNING, ex.getReason());
+        assertTrue(bills.isEmpty());
+    }
+
+    @Test
     public void 核验四样不齐推不动补齐才走() {
         ItemFlowForm f = fullForm("D-GATE");
         f.setProtectUnit(null);

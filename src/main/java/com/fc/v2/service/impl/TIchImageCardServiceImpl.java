@@ -28,6 +28,9 @@ import org.springframework.stereotype.Service;
 @Service
 public class TIchImageCardServiceImpl extends ServiceImpl<TIchImageCardMapper, TIchImageCard> implements ITIchImageCardService {
 
+    /** 建卷进展：已冻住（冻住即锁档：卷面改不动、整张删不掉，与收口锁档同一规矩） */
+    private static final int STATUS_FROZEN = 2;
+
     @Autowired
     private TIchProjectMapper ichProjectMapper;
 
@@ -93,9 +96,12 @@ public class TIchImageCardServiceImpl extends ServiceImpl<TIchImageCardMapper, T
             record.setDevRate(calcDevRate(record.getPlanQty(), record.getRealQty()));
         }
         record.setUpdateTime(new Date());
+        // 冻住即锁档：库里这卷已冻住（status=2）便一个字都改不动，
+        // 条件看的是库里现行值（NULL 视为未冻住），表单自带 status 也翻不开它
         return this.baseMapper.update(record, new UpdateWrapper<TIchImageCard>()
                 .eq("id", record.getId())
-                .eq("del_flag", 0));
+                .eq("del_flag", 0)
+                .and(w -> w.isNull("status").or().ne("status", STATUS_FROZEN)));
     }
 
     /** 取在册（未删、未注销）的归属项目；找不到回 null，新建/编辑共用 */
@@ -146,11 +152,32 @@ public class TIchImageCardServiceImpl extends ServiceImpl<TIchImageCardMapper, T
     @Override
     public int deleteTIchImageCardByIds(String ids) {
         Long[] idArr = ConvertUtil.toLongArray(ids);
-        return this.baseMapper.deleteBatchIds(Arrays.asList(idArr));
+        if (idArr == null || idArr.length == 0) {
+            return 0;
+        }
+        // 软删：只把删除标记翻成 1，卷子仍留在册里可翻；与所有查询 del_flag=0 的口径对齐。
+        // 冻住即锁档的卷子一张都不抹。
+        TIchImageCard patch = new TIchImageCard();
+        patch.setDelFlag(1);
+        patch.setUpdateTime(new Date());
+        return this.baseMapper.update(patch, new UpdateWrapper<TIchImageCard>()
+                .in("id", Arrays.asList(idArr))
+                .eq("del_flag", 0)
+                .and(w -> w.isNull("status").or().ne("status", STATUS_FROZEN)));
     }
 
     @Override
     public int deleteTIchImageCardById(Long id) {
-        return this.baseMapper.deleteById(id);
+        if (id == null) {
+            return 0;
+        }
+        // 软删：翻删除标记而非物理抹除，事后仍查得到这一卷；冻住卷删不掉
+        TIchImageCard patch = new TIchImageCard();
+        patch.setDelFlag(1);
+        patch.setUpdateTime(new Date());
+        return this.baseMapper.update(patch, new UpdateWrapper<TIchImageCard>()
+                .eq("id", id)
+                .eq("del_flag", 0)
+                .and(w -> w.isNull("status").or().ne("status", STATUS_FROZEN)));
     }
 }
